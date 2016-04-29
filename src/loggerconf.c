@@ -11,8 +11,10 @@ enum
     /* Logger type */
     kConsoleLogger = 1 << 0,
     kFileLogger = 1 << 1,
+    kDataLogger = 1 << 2,
 
     kMaxFileNameLen = 256,
+    kMaxAddressLen = 16, /* IPv4 only */
     kMaxLineLen = 512,
 };
 
@@ -31,6 +33,14 @@ static struct
     unsigned char maxBackupFiles;
 }
 s_flog;
+
+/* Data logger */
+static struct
+{
+    char address[kMaxAddressLen];
+    unsigned int port;
+}
+s_dlog;
 
 static int s_logger;
 
@@ -69,6 +79,9 @@ int logger_configure(const char* filename)
     }
     if (hasFlag(s_logger, kFileLogger)) {
         ok &= logger_initFileLogger(s_flog.filename, s_flog.maxFileSize, s_flog.maxBackupFiles);
+    }
+    if (hasFlag(s_logger, kDataLogger)) {
+        ok &= logger_initDataLogger(s_dlog.address, s_dlog.port);
     }
     if (s_logger == 0 || !ok) {
         return 0;
@@ -126,6 +139,8 @@ static void parseLine(char* line)
             s_logger |= kConsoleLogger;
         } else if (strcmp(val, "file") == 0) {
             s_logger |= kFileLogger;
+        } else if (strcmp(val, "data") == 0) {
+            s_logger |= kDataLogger;
         } else {
             fprintf(stderr, "ERROR: loggerconf: Invalid logger: `%s`\n", val);
             s_logger = 0;
@@ -150,6 +165,10 @@ static void parseLine(char* line)
             nfiles = 0;
         }
         s_flog.maxBackupFiles = nfiles;
+    } else if (strcmp(key, "logger.data.address") == 0) {
+        strncpy(s_dlog.address, val, sizeof(s_dlog.address));
+    } else if (strcmp(key, "logger.data.port") == 0) {
+        s_dlog.port = atoi(val);
     }
 }
 

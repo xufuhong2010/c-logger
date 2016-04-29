@@ -18,6 +18,8 @@ extern "C" {
  * |logger.file.filename       |A output filename (max length is 255 bytes) |
  * |logger.file.maxFileSize    |1-LONG_MAX [bytes] or 1 MB (size <= 0)      |
  * |logger.file.maxBackupFiles |0-255                                       |
+ * |logger.data.address        |An IPv4 address of a data server            |
+ * |logger.data.port           |A port of a data server                     |
  *
  * @param[in] filename The name of the configuration file
  * @return Non-zero value upon success or 0 on error

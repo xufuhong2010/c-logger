@@ -6,12 +6,18 @@
 #if defined(_WIN32) || defined(_WIN64)
  #include <winsock2.h>
 #else
+ #include <arpa/inet.h>
  #include <pthread.h>
+ #include <sys/socket.h>
  #include <sys/time.h>
+ #include <unistd.h>
  #if defined(__linux__) || (defined(__APPLE__) && defined(__MACH__))
   #include <sys/syscall.h>
-  #include <unistd.h>
  #endif /* defined(__linux__) || (defined(__APPLE__) && defined(__MACH__)) */
+#endif /* defined(_WIN32) || defined(_WIN64) */
+
+#if defined(_WIN32) || defined(_WIN64)
+ #pragma comment(lib, "ws2_32.lib")
 #endif /* defined(_WIN32) || defined(_WIN64) */
 
 enum
@@ -19,9 +25,12 @@ enum
     /* Logger type */
     kConsoleLogger = 1 << 0,
     kFileLogger = 1 << 1,
+    kDataLogger = 1 << 2,
 
     kMaxFileNameLen = 256,
     kDefaultMaxFileSize = 1048576L, /* 1 MB */
+    kMaxAddressLen = 16, /* IPv4 only */
+    kMaxDataLen = 512,
     kFlushInterval = 10000, /* 1-999999 usec */
 };
 
@@ -43,12 +52,27 @@ static struct
 }
 s_flog;
 
+/* Data logger */
+static struct
+{
+    char address[kMaxAddressLen];
+    unsigned int port;
+#if defined(_WIN32) || defined(_WIN64)
+    SOCKET fd;
+#else
+    int fd;
+#endif /* defined(_WIN32) || defined(_WIN64) */
+    char data[kMaxDataLen];
+}
+s_dlog = { "", 0, -1, "" };
+
 static int s_logger;
 static enum LogLevel s_logLevel = LogLevel_INFO;
 static struct timeval s_flushtime;
 static int s_initialized = 0; /* false */
 #if defined(_WIN32) || defined(_WIN64)
 static CRITICAL_SECTION s_mutex;
+static WSADATA s_wsadata;
 #else
 static pthread_mutex_t s_mutex;
 #endif /* defined(_WIN32) || defined(_WIN64) */
@@ -60,6 +84,9 @@ static void init(void)
     }
 #if defined(_WIN32) || defined(_WIN64)
     InitializeCriticalSection(&s_mutex);
+    if (WSAStartup(MAKEWORD(2, 0), &s_wsadata) != 0) {
+        fprintf(stderr, "ERROR: logger: WSAStartup: %d\n", WSAGetLastError());
+    }
 #else
     pthread_mutex_init(&s_mutex, NULL);
 #endif /* defined(_WIN32) || defined(_WIN64) */
@@ -126,9 +153,9 @@ int logger_initConsoleLogger(FILE* output)
         return 0;
     }
 
+    init();
     s_clog.output = output;
     s_logger |= kConsoleLogger;
-    init();
     return 1;
 }
 
@@ -153,6 +180,7 @@ int logger_initFileLogger(const char* filename, long maxFileSize, unsigned char 
         return 0;
     }
 
+    init();
     if (s_flog.fp != NULL) { /* reinit */
         fclose(s_flog.fp);
     }
@@ -166,7 +194,32 @@ int logger_initFileLogger(const char* filename, long maxFileSize, unsigned char 
     s_flog.maxFileSize = (maxFileSize > 0) ? maxFileSize : kDefaultMaxFileSize;
     s_flog.maxBackupFiles = maxBackupFiles;
     s_logger |= kFileLogger;
+    return 1;
+}
+
+int logger_initDataLogger(const char* address, unsigned int port)
+{
+    if (address == NULL) {
+        assert(0 && "address must not be NULL");
+        return 0;
+    }
+
     init();
+    if (s_dlog.fd != -1) { /* reinit */
+#if defined(_WIN32) || defined(_WIN64)
+        closesocket(s_dlog.fd);
+#else
+        close(s_dlog.fd);
+#endif /* defined(_WIN32) || defined(_WIN64) */
+    }
+    strncpy(s_dlog.address, address, kMaxAddressLen - 1);
+    s_dlog.port = port;
+    s_dlog.fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s_dlog.fd == -1) {
+        fprintf(stderr, "ERROR: logger: Failed to create a new FD\n");
+        return 0;
+    }
+    s_logger |= kDataLogger;
     return 1;
 }
 
@@ -327,4 +380,48 @@ void logger_log(enum LogLevel level, const char* file, int line, const char* fmt
     va_end(arg);
 cleanup:
     unlock();
+}
+
+static int sendUDP(const char* buf, size_t len)
+{
+    struct sockaddr_in to = {0};
+    to.sin_family = AF_INET;
+#if defined(_WIN32) || defined(_WIN64)
+    to.sin_addr.S_un.S_addr = inet_addr(s_dlog.address);
+#else
+    to.sin_addr.s_addr = inet_addr(s_dlog.address);
+#endif /* defined(_WIN32) || defined(_WIN64) */
+    to.sin_port = htons(s_dlog.port);
+    return sendto(s_dlog.fd, buf, len, 0, (struct sockaddr*) &to, sizeof(to));
+}
+
+void logger_logData(const char* param, const char* unit, float value)
+{
+    if (param == NULL) {
+        assert(0 && "param must not be NULL");
+        return;
+    }
+    if (unit == NULL) {
+        assert(0 && "unit must not be NULL");
+        return;
+    }
+    if (!s_initialized) {
+        assert(0 && "Not initialized");
+        return;
+    }
+
+    if (s_logLevel > LogLevel_DEBUG) {
+        return;
+    }
+    if (!hasFlag(s_logger, kDataLogger)) {
+        return;
+    }
+    sprintf(s_dlog.data,
+            "{\"kind\":\"parameter\""
+            ",\"type\":\"%s\""
+            ",\"unit\":\"%s\""
+            ",\"description\":\"\""
+            ",\"value\":\"%f\"}",
+            param, unit, value);
+    sendUDP(s_dlog.data, strlen(s_dlog.data));
 }
