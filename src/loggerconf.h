@@ -13,7 +13,7 @@ extern "C" {
  * |key                        |value                                       |
  * |:--------------------------|:-------------------------------------------|
  * |level                      |TRACE, DEBUG, INFO, WARN, ERROR or FATAL    |
- * |logger                     |console or file                             |
+ * |logger                     |console, file or data                       |
  * |logger.console.output      |stdout or stderr                            |
  * |logger.file.filename       |A output filename (max length is 255 bytes) |
  * |logger.file.maxFileSize    |1-LONG_MAX [bytes] or 1 MB (size <= 0)      |
