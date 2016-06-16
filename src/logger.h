@@ -95,7 +95,8 @@ void logger_log(enum LogLevel level, const char* file, int line, const char* fmt
 
 /**
  * Log a parameter value.
- * If the setting log level is lower than INFO, this function does not log.
+ * This function is used for debug. Thus this function does not log
+ * if the setting log level is greater than DEBUG.
  * Make sure to call one of the following initialize functions before starting logging.
  * - logger_initDataLogger()
  *
