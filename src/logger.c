@@ -65,9 +65,8 @@ static struct
 s_dlog;
 
 static int s_logger;
-static enum LogLevel s_logLevel = LogLevel_INFO;
-static struct timeval s_flushtime;
-static int s_initialized = 0; /* false */
+static volatile enum LogLevel s_logLevel = LogLevel_INFO;
+static volatile int s_initialized = 0; /* false */
 #if defined(_WIN32) || defined(_WIN64)
 static WSADATA s_wsadata;
 static CRITICAL_SECTION s_mutex;
@@ -152,8 +151,10 @@ int logger_initConsoleLogger(FILE* output)
     }
 
     init();
+    lock();
     s_clog.output = output;
     s_logger |= kConsoleLogger;
+    unlock();
     return 1;
 }
 
@@ -173,41 +174,50 @@ static long getFileSize(const char* filename)
 
 int logger_initFileLogger(const char* filename, long maxFileSize, unsigned char maxBackupFiles)
 {
+    int ok = 0; /* false */
+
     if (filename == NULL) {
         assert(0 && "filename must not be NULL");
         return 0;
     }
 
     init();
+    lock();
     if (s_flog.fp != NULL) { /* reinit */
         fclose(s_flog.fp);
     }
     s_flog.fp = fopen(filename, "a");
     if (s_flog.fp == NULL) {
         fprintf(stderr, "ERROR: logger: Failed to open file: `%s`\n", filename);
-        return 0;
+        goto cleanup;
     }
     s_flog.currentFileSize = getFileSize(filename);
     strncpy(s_flog.filename, filename, kMaxFileNameLen - 1);
     s_flog.maxFileSize = (maxFileSize > 0) ? maxFileSize : kDefaultMaxFileSize;
     s_flog.maxBackupFiles = maxBackupFiles;
     s_logger |= kFileLogger;
-    return 1;
+    ok = 1; /* true */
+cleanup:
+    unlock();
+    return ok;
 }
 
 int logger_initDataLogger(const char* address, unsigned int port)
 {
+    int ok = 0; /* false */
+
     if (address == NULL) {
         assert(0 && "address must not be NULL");
         return 0;
     }
 
     init();
+    lock();
     if (s_dlog.fd <= 0) { /* init once */
         s_dlog.fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (s_dlog.fd == -1) {
             fprintf(stderr, "ERROR: logger: Failed to create a new FD\n");
-            return 0;
+            goto cleanup;
         }
     }
     s_dlog.sockaddr.sin_family = AF_INET;
@@ -218,7 +228,10 @@ int logger_initDataLogger(const char* address, unsigned int port)
     s_dlog.sockaddr.sin_addr.s_addr = inet_addr(address);
 #endif /* defined(_WIN32) || defined(_WIN64) */
     s_logger |= kDataLogger;
-    return 1;
+    ok = 1; /* true */
+cleanup:
+    unlock();
+    return ok;
 }
 
 void logger_setLevel(enum LogLevel level)
@@ -229,6 +242,11 @@ void logger_setLevel(enum LogLevel level)
 enum LogLevel logger_getLevel(void)
 {
     return s_logLevel;
+}
+
+int logger_isEnabled(enum LogLevel level)
+{
+    return s_logLevel <= level;
 }
 
 static char* getBackupFileName(const char* basename, unsigned char index)
@@ -261,14 +279,14 @@ static int isFileExist(const char* filename)
 
 static int rotateLogFiles(void)
 {
-    unsigned char i;
+    int i;
     char *src, *dst;
 
     if (s_flog.currentFileSize < s_flog.maxFileSize) {
         return s_flog.fp != NULL;
     }
     fclose(s_flog.fp);
-    for (i = s_flog.maxBackupFiles; i > 0; i--) {
+    for (i = (int) s_flog.maxBackupFiles; i > 0; i--) {
         src = getBackupFileName(s_flog.filename, i - 1);
         dst = getBackupFileName(s_flog.filename, i);
         if (src != NULL && dst != NULL) {
@@ -303,6 +321,7 @@ static long vflog(enum LogLevel level, FILE* fp, const char* file, int line, con
     char timestr[32];
     int size;
     long totalsize = 0;
+    static struct timeval flushtime;
 
     switch (level) {
         case LogLevel_TRACE:
@@ -340,10 +359,10 @@ static long vflog(enum LogLevel level, FILE* fp, const char* file, int line, con
     if ((size = fprintf(fp, "\n")) > 0) {
         totalsize += size;
     }
-    if (now.tv_sec - s_flushtime.tv_sec >= 1 || now.tv_usec - s_flushtime.tv_usec > kFlushInterval) {
+    if (now.tv_sec - flushtime.tv_sec >= 1 || now.tv_usec - flushtime.tv_usec > kFlushInterval) {
         fflush(fp);
-        s_flushtime.tv_sec = now.tv_sec;
-        s_flushtime.tv_usec = now.tv_usec;
+        flushtime.tv_sec = now.tv_sec;
+        flushtime.tv_usec = now.tv_usec;
     }
     return totalsize;
 }
@@ -362,11 +381,11 @@ void logger_log(enum LogLevel level, const char* file, int line, const char* fmt
         return;
     }
 
-    lock();
-    if (s_logLevel > level) {
-        goto cleanup;
+    if (!logger_isEnabled(level)) {
+        return;
     }
     va_start(arg, fmt);
+    lock();
     if (hasFlag(s_logger, kConsoleLogger)) {
         vflog(level, s_clog.output, file, line, fmt, arg);
     }
@@ -375,9 +394,8 @@ void logger_log(enum LogLevel level, const char* file, int line, const char* fmt
             s_flog.currentFileSize += vflog(level, s_flog.fp, file, line, fmt, arg);
         }
     }
-    va_end(arg);
-cleanup:
     unlock();
+    va_end(arg);
 }
 
 void logger_logData(const char* param, const char* unit, float value)
@@ -398,16 +416,17 @@ void logger_logData(const char* param, const char* unit, float value)
     if (s_logLevel > LogLevel_DEBUG) {
         return;
     }
-    if (!hasFlag(s_logger, kDataLogger)) {
-        return;
+    lock();
+    if (hasFlag(s_logger, kDataLogger)) {
+        sprintf(s_dlog.data,
+                "{\"kind\":\"parameter\""
+                ",\"type\":\"%s\""
+                ",\"unit\":\"%s\""
+                ",\"description\":\"\""
+                ",\"value\":\"%f\"}",
+                param, unit, value);
+        sendto(s_dlog.fd, s_dlog.data, strlen(s_dlog.data), 0,
+                (struct sockaddr*) &s_dlog.sockaddr, sizeof(s_dlog.sockaddr));
     }
-    sprintf(s_dlog.data,
-            "{\"kind\":\"parameter\""
-            ",\"type\":\"%s\""
-            ",\"unit\":\"%s\""
-            ",\"description\":\"\""
-            ",\"value\":\"%f\"}",
-            param, unit, value);
-    sendto(s_dlog.fd, s_dlog.data, strlen(s_dlog.data), 0,
-            (struct sockaddr*) &s_dlog.sockaddr, sizeof(s_dlog.sockaddr));
+    unlock();
 }

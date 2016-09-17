@@ -22,28 +22,30 @@ static int test_fileLogger(void)
     char line[256];
     int count = 0;
 
-    /* when: */
+    /* when: initialize file logger */
     result = logger_initFileLogger(kOutputFilename, 0, 0);
 
-    /* then: */
+    /* then: ok */
     nu_assert_eq_int(1, result);
 
     /* when: output to the file */
-    LOG_ERROR(message);
+    LOG_TRACE(message);
+    LOG_DEBUG(message);
+    LOG_INFO(message);
 
-    /* then: */
+    /* then: write only one line */
     if ((fp = fopen(kOutputFilename, "r")) == NULL) {
         nu_fail();
     }
     while (fgets(line, sizeof(line), fp) != NULL) {
         line[strlen(line) - 1] = '\0'; /* remove LF */
-        nu_assert_eq_int('E', line[0]);
-        nu_assert_eq_str(message, &line[strlen(line) - sizeof(message) + 1]);
+        nu_assert_eq_int('I', line[0]);
+        nu_assert_eq_str(message, &line[strlen(line) - strlen(message)]);
         count++;
     }
     nu_assert_eq_int(1, count);
 
-    /* cleanup: */
+    /* cleanup: close resources */
     fclose(fp);
     return 0;
 }
