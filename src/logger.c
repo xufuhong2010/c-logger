@@ -29,7 +29,6 @@ enum
 
     kMaxFileNameLen = 256,
     kDefaultMaxFileSize = 1048576L, /* 1 MB */
-    kMaxAddressLen = 16, /* IPv4 only */
     kMaxDataLen = 512,
     kFlushInterval = 10000, /* 1-999999 usec */
 };
@@ -55,24 +54,23 @@ s_flog;
 /* Data logger */
 static struct
 {
-    char address[kMaxAddressLen];
-    unsigned int port;
 #if defined(_WIN32) || defined(_WIN64)
     SOCKET fd;
 #else
     int fd;
 #endif /* defined(_WIN32) || defined(_WIN64) */
+    struct sockaddr_in sockaddr;
     char data[kMaxDataLen];
 }
-s_dlog = { "", 0, -1, "" };
+s_dlog;
 
 static int s_logger;
 static enum LogLevel s_logLevel = LogLevel_INFO;
 static struct timeval s_flushtime;
 static int s_initialized = 0; /* false */
 #if defined(_WIN32) || defined(_WIN64)
-static CRITICAL_SECTION s_mutex;
 static WSADATA s_wsadata;
+static CRITICAL_SECTION s_mutex;
 #else
 static pthread_mutex_t s_mutex;
 #endif /* defined(_WIN32) || defined(_WIN64) */
@@ -83,10 +81,10 @@ static void init(void)
         return;
     }
 #if defined(_WIN32) || defined(_WIN64)
-    InitializeCriticalSection(&s_mutex);
     if (WSAStartup(MAKEWORD(2, 0), &s_wsadata) != 0) {
         fprintf(stderr, "ERROR: logger: WSAStartup: %d\n", WSAGetLastError());
     }
+    InitializeCriticalSection(&s_mutex);
 #else
     pthread_mutex_init(&s_mutex, NULL);
 #endif /* defined(_WIN32) || defined(_WIN64) */
@@ -205,20 +203,20 @@ int logger_initDataLogger(const char* address, unsigned int port)
     }
 
     init();
-    if (s_dlog.fd != -1) { /* reinit */
+    if (s_dlog.fd <= 0) { /* init once */
+        s_dlog.fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s_dlog.fd == -1) {
+            fprintf(stderr, "ERROR: logger: Failed to create a new FD\n");
+            return 0;
+        }
+    }
+    s_dlog.sockaddr.sin_family = AF_INET;
+    s_dlog.sockaddr.sin_port = htons(port);
 #if defined(_WIN32) || defined(_WIN64)
-        closesocket(s_dlog.fd);
+    s_dlog.sockaddr.sin_addr.S_un.S_addr = inet_addr(address);
 #else
-        close(s_dlog.fd);
+    s_dlog.sockaddr.sin_addr.s_addr = inet_addr(address);
 #endif /* defined(_WIN32) || defined(_WIN64) */
-    }
-    strncpy(s_dlog.address, address, kMaxAddressLen - 1);
-    s_dlog.port = port;
-    s_dlog.fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s_dlog.fd == -1) {
-        fprintf(stderr, "ERROR: logger: Failed to create a new FD\n");
-        return 0;
-    }
     s_logger |= kDataLogger;
     return 1;
 }
@@ -382,19 +380,6 @@ cleanup:
     unlock();
 }
 
-static int sendUDP(const char* buf, size_t len)
-{
-    struct sockaddr_in to = {0};
-    to.sin_family = AF_INET;
-#if defined(_WIN32) || defined(_WIN64)
-    to.sin_addr.S_un.S_addr = inet_addr(s_dlog.address);
-#else
-    to.sin_addr.s_addr = inet_addr(s_dlog.address);
-#endif /* defined(_WIN32) || defined(_WIN64) */
-    to.sin_port = htons(s_dlog.port);
-    return sendto(s_dlog.fd, buf, len, 0, (struct sockaddr*) &to, sizeof(to));
-}
-
 void logger_logData(const char* param, const char* unit, float value)
 {
     if (param == NULL) {
@@ -423,5 +408,6 @@ void logger_logData(const char* param, const char* unit, float value)
             ",\"description\":\"\""
             ",\"value\":\"%f\"}",
             param, unit, value);
-    sendUDP(s_dlog.data, strlen(s_dlog.data));
+    sendto(s_dlog.fd, s_dlog.data, strlen(s_dlog.data), 0,
+            (struct sockaddr*) &s_dlog.sockaddr, sizeof(s_dlog.sockaddr));
 }
