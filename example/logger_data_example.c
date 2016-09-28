@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #if defined(_WIN32) || defined(_WIN64)
  #include <windows.h>
- #define sleep(n) Sleep(n * 1000)
+ #define sleep(n) Sleep((n) * 1000)
 #else
  #include <unistd.h>
 #endif /* defined(_WIN32) || defined(_WIN64) */
