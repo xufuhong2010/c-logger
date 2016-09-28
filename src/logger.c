@@ -64,7 +64,7 @@ static struct
     struct sockaddr_in sockaddr;
     char data[kMaxDataLen];
 }
-s_dlog;
+s_dlog = { -1, {0}, "" };
 
 static volatile int s_logger;
 static volatile enum LogLevel s_logLevel = LogLevel_INFO;
@@ -221,7 +221,7 @@ int logger_initDataLogger(const char* address, unsigned int port)
 
     init();
     lock();
-    if (s_dlog.fd <= 0) { /* init once */
+    if (s_dlog.fd == -1) { /* init once */
         s_dlog.fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (s_dlog.fd == -1) {
             fprintf(stderr, "ERROR: logger: Failed to create a new FD\n");
