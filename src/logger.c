@@ -424,7 +424,7 @@ void logger_logData(const char* param, const char* unit, float value)
         return;
     }
 
-    if (s_logLevel > LogLevel_DEBUG) {
+    if (!logger_isEnabled(LogLevel_DEBUG)) {
         return;
     }
     lock();
