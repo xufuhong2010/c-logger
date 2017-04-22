@@ -10,10 +10,8 @@
  #include <pthread.h>
  #include <sys/socket.h>
  #include <sys/time.h>
+ #include <sys/syscall.h>
  #include <unistd.h>
- #if defined(__linux__) || (defined(__APPLE__) && defined(__MACH__))
-  #include <sys/syscall.h>
- #endif /* defined(__linux__) || (defined(__APPLE__) && defined(__MACH__)) */
 #endif /* defined(_WIN32) || defined(_WIN64) */
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -37,7 +35,7 @@ enum
 static struct
 {
     FILE* output;
-    struct timeval flushtime;
+    long flushedTime;
 }
 s_clog;
 
@@ -49,7 +47,7 @@ static struct
     long maxFileSize;
     unsigned char maxBackupFiles;
     long currentFileSize;
-    struct timeval flushtime;
+    long flushedTime;
 }
 s_flog;
 
@@ -68,6 +66,7 @@ s_dlog = { -1, {0}, "" };
 
 static volatile int s_logger;
 static volatile enum LogLevel s_logLevel = LogLevel_INFO;
+static volatile long s_flushInterval = 0; /* msec, 0 is auto flush off */
 static volatile int s_initialized = 0; /* false */
 #if defined(_WIN32) || defined(_WIN64)
 static WSADATA s_wsadata;
@@ -130,7 +129,7 @@ static int gettimeofday(struct timeval* tv, void* tz)
     return 0;
 }
 
-struct tm* localtime_r(const time_t* timep, struct tm* result)
+static struct tm* localtime_r(const time_t* timep, struct tm* result)
 {
     localtime_s(result, timep);
     return result;
@@ -257,6 +256,54 @@ int logger_isEnabled(enum LogLevel level)
     return s_logLevel <= level;
 }
 
+void logger_autoFlush(long interval)
+{
+    s_flushInterval = interval > 0 ? interval : 0;
+}
+
+static int hasFlag(int flags, int flag)
+{
+    return (flags & flag) == flag;
+}
+
+void logger_flush()
+{
+    if (s_logger == 0 || !s_initialized) {
+        assert(0 && "logger is not initialized");
+        return;
+    }
+
+    if (hasFlag(s_logger, kConsoleLogger)) {
+        fflush(s_clog.output);
+    }
+    if (hasFlag(s_logger, kFileLogger)) {
+        fflush(s_flog.output);
+    }
+}
+
+static char getLevelChar(enum LogLevel level)
+{
+    switch (level) {
+        case LogLevel_TRACE: return 'T';
+        case LogLevel_DEBUG: return 'D';
+        case LogLevel_INFO:  return 'I';
+        case LogLevel_WARN:  return 'W';
+        case LogLevel_ERROR: return 'E';
+        case LogLevel_FATAL: return 'F';
+        default: return ' ';
+    }
+}
+
+static void getTimestamp(const struct timeval* time, char* timestamp, size_t len)
+{
+    time_t sec = time->tv_sec; // a necessary variable to avoid a runtime error on Windows
+    struct tm calendar;
+
+    localtime_r(&sec, &calendar);
+    strftime(timestamp, len, "%y-%m-%d %H:%M:%S", &calendar);
+    sprintf(&timestamp[17], ".%06ld", (long) time->tv_usec);
+}
+
 static char* getBackupFileName(const char* basename, unsigned char index)
 {
     int len = strlen(basename) + 4; /* <basename>.255 */
@@ -321,17 +368,14 @@ static int rotateLogFiles(void)
     return 1;
 }
 
-static long vflog(FILE* fp, struct timeval* timestamp, struct tm* calendar,
-        char levelc, long threadID, const char* file, int line, const char* fmt, va_list arg,
-        struct timeval* flushtime)
+static long vflog(FILE* fp, char levelc, const char* timestamp, long threadID,
+        const char* file, int line, const char* fmt, va_list arg,
+        long currentTime, long* flushedTime)
 {
-    char timestr[32];
     int size;
     long totalsize = 0;
 
-    strftime(timestr, sizeof(timestr), "%y-%m-%d %H:%M:%S", calendar);
-    sprintf(timestr, "%s.%06ld", timestr, (long) timestamp->tv_usec);
-    if ((size = fprintf(fp, "%c %s %ld %s:%d: ", levelc, timestr, threadID, file, line)) > 0) {
+    if ((size = fprintf(fp, "%c %s %ld %s:%d: ", levelc, timestamp, threadID, file, line)) > 0) {
         totalsize += size;
     }
     if ((size = vfprintf(fp, fmt, arg)) > 0) {
@@ -340,41 +384,21 @@ static long vflog(FILE* fp, struct timeval* timestamp, struct tm* calendar,
     if ((size = fprintf(fp, "\n")) > 0) {
         totalsize += size;
     }
-    if (timestamp->tv_sec - flushtime->tv_sec >= 1
-            || timestamp->tv_usec - flushtime->tv_usec > kFlushInterval) {
-        fflush(fp);
-        flushtime->tv_sec = timestamp->tv_sec;
-        flushtime->tv_usec = timestamp->tv_usec;
+    if (s_flushInterval > 0) {
+        if (currentTime - *flushedTime > s_flushInterval) {
+            fflush(fp);
+            *flushedTime = currentTime;
+        }
     }
     return totalsize;
 }
 
-static char getLevelChar(enum LogLevel level)
-{
-    switch (level) {
-        case LogLevel_TRACE: return 'T';
-        case LogLevel_DEBUG: return 'D';
-        case LogLevel_INFO:  return 'I';
-        case LogLevel_WARN:  return 'W';
-        case LogLevel_ERROR: return 'E';
-        case LogLevel_FATAL: return 'F';
-        default:
-            assert(0 && "Unknown LogLevel");
-            return ' ';
-    }
-}
-
-static int hasFlag(int flags, int flag)
-{
-    return (flags & flag) == flag;
-}
-
 void logger_log(enum LogLevel level, const char* file, int line, const char* fmt, ...)
 {
-    struct timeval timestamp;
-    time_t sec;
-    struct tm calendar;
+    struct timeval now;
+    long currentTime; /* milliseconds */
     char levelc;
+    char timestamp[32];
     long threadID;
     va_list carg, farg;
 
@@ -386,23 +410,23 @@ void logger_log(enum LogLevel level, const char* file, int line, const char* fmt
     if (!logger_isEnabled(level)) {
         return;
     }
-    gettimeofday(&timestamp, NULL);
-    sec = timestamp.tv_sec;
-    localtime_r(&sec, &calendar);
+    gettimeofday(&now, NULL);
+    currentTime = now.tv_sec * 1000 + now.tv_usec / 1000;
     levelc = getLevelChar(level);
+    getTimestamp(&now, timestamp, sizeof(timestamp));
     threadID = getCurrentThreadID();
     lock();
     if (hasFlag(s_logger, kConsoleLogger)) {
         va_start(carg, fmt);
-        vflog(s_clog.output, &timestamp, &calendar,
-                levelc, threadID, file, line, fmt, carg, &s_clog.flushtime);
+        vflog(s_clog.output, levelc, timestamp, threadID,
+                file, line, fmt, carg, currentTime, &s_clog.flushedTime);
         va_end(carg);
     }
     if (hasFlag(s_logger, kFileLogger)) {
         if (rotateLogFiles()) {
             va_start(farg, fmt);
-            s_flog.currentFileSize += vflog(s_flog.output, &timestamp, &calendar,
-                    levelc, threadID, file, line, fmt, farg, &s_flog.flushtime);
+            s_flog.currentFileSize += vflog(s_flog.output, levelc, timestamp, threadID,
+                    file, line, fmt, farg, currentTime, &s_flog.flushedTime);
             va_end(farg);
         }
     }
