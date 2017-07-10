@@ -28,7 +28,6 @@ enum
     kMaxFileNameLen = 256,
     kDefaultMaxFileSize = 1048576L, /* 1 MB */
     kMaxDataLen = 512,
-    kFlushInterval = 10000, /* 1-999999 usec */
 };
 
 /* Console logger */
